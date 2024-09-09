@@ -1,0 +1,256 @@
+name: cmt_lidar_camera_hetero_intermediatefusion
+root_dir: "/media/re/2384a6b4-4dae-400d-ad72-9b7044491b55/cov2v/OPV2VDATA/tmp"
+validate_dir: "/media/re/2384a6b4-4dae-400d-ad72-9b7044491b55/cov2v/OPV2VDATA/tmp"
+test_dir: "/media/re/2384a6b4-4dae-400d-ad72-9b7044491b55/cov2v/OPV2VDATA/tmp"
+
+yaml_parser: ["load_point_cloud_params", "load_mmcv_param"]
+mmcv_file_path_ptr: ["model.args.camera.CMT_C.mmcv_file_path", "model.args.lidar.CMT_L.mmcv_file_path"]
+train_params:
+  batch_size: &batch_size 2
+  epoches: &epoches 151
+  eval_freq: 3
+  save_freq: 1
+  max_cav: &max_cav 5
+  num_classes: &num_classes 2
+
+comm_range: 70
+input_source: ['lidar', 'camera']
+label_type: 'lidar'
+cav_lidar_range: &cav_lidar [-102.4, -102.4, -3, 102.4, 102.4, 1]
+
+use_camera_flag: &use_camera True
+use_lidar_flag: &use_lidar True
+single_camera_cav_detection_range: &camera_detection_range [-51.2, -51.2, -3, 51.2, 51.2, 1]
+single_lidar_cav_detection_range: &lidar_detection_range [-102.4, -102.4, -3.0, 102.4, 102.4, 1.0]
+fused_ego_detection_range: &fused_ego_detection_range [-102.4, -102.4, -3.0, 102.4, 102.4, 1.0]
+single_camera_ego_gt_range: &single_camera_ego_gt_range [-51.2, -51.2, -3, 51.2, 51.2, 1]
+single_lidar_ego_gt_range: &single_lidar_ego_gt_range [-102.4, -102.4, -3.0, 102.4, 102.4, 1.0]
+fused_ego_gt_range: &fused_ego_gt_range [-102.4, -102.4, -3.0, 102.4, 102.4, 1.0]
+
+add_data_extension: ['bev_visibility.png']
+
+heter:
+  assignment_path: "/media/re/2384a6b4-4dae-400d-ad72-9b7044491b55/RightChoice/COCMT/opencood/modality_assign/opv2v_4modality.json"
+  ego_modality: &ego_modality "m1&m2"
+  mapping_dict:
+    m1: m1
+    m2: m1
+    m3: m2
+    m4: m2
+  modality_setting:
+    m1:
+      sensor_type: &sensor_type_m1 'lidar'
+
+      # lidar requires preprocess
+      preprocess:
+        # options: BasePreprocessor, VoxelPreprocessor, BevPreprocessor
+        core_method: 'SpVoxelPreprocessor'
+        args:
+          voxel_size: &voxel_size [0.4, 0.4, 4]
+          max_points_per_voxel: 32
+          max_voxel_train: 32000
+          max_voxel_test: 70000
+        # lidar range for each individual cav.
+        cav_lidar_range: *cav_lidar
+
+    m2:
+      sensor_type: &sensor_type_m2 'camera'
+
+      data_aug_conf: &data_aug_conf_m2
+        resize_lim: &resize_ratio [0.64, 0.64]
+        final_dim: &image_shape [384, 512]
+        rot_lim: [0.0, 0.0]
+        H: 600
+        W: 800
+        rand_flip: False
+        bot_pct_lim: [0.0, 0.0]
+        cams: ['camera0', 'camera1', 'camera2', 'camera3']
+        Ncams: 4
+
+fusion:
+  core_method: 'intermediateheter'
+  dataset: 'opv2v'
+  args:
+    proj_first: false
+    grid_conf: None # place-holder
+    data_aug_conf: None # place-holder
+
+data_augment: # no use in intermediate fusion
+  - NAME: random_world_flip
+    ALONG_AXIS_LIST: [ 'x' ]
+
+  - NAME: random_world_rotation
+    WORLD_ROT_ANGLE: [ -0.78539816, 0.78539816 ]
+
+  - NAME: random_world_scaling
+    WORLD_SCALE_RANGE: [ 0.95, 1.05 ]
+
+preprocess:
+  # options: BasePreprocessor, VoxelPreprocessor, BevPreprocessor
+  core_method: 'SpVoxelPreprocessor'
+  args:
+    voxel_size: [0.4, 0.4, 4] # useful
+    max_points_per_voxel: 1 # useless
+    max_voxel_train: 1 # useless
+    max_voxel_test: 1 # useless
+  # lidar range for each individual cav.
+  cav_lidar_range: *cav_lidar
+
+# anchor box related
+postprocess:
+  core_method: 'CMT_VoxelPostprocessor' # VoxelPostprocessor, BevPostprocessor supported
+  anchor_free: True
+  gt_range: *cav_lidar
+  anchor_args:
+    cav_lidar_range: *cav_lidar
+    multi_range_deepsupervision: True
+    single_camera_ego_gt_range: *single_camera_ego_gt_range
+    single_lidar_ego_gt_range: *single_lidar_ego_gt_range
+  target_args:
+    score_threshold: 0.20
+  order: 'lwh' # hwl or lwh ### align the bbox order to nuscenes
+  max_num: 120 # maximum number of objects in a single frame. use this number to make sure different frames has the same dimension in the same batch
+  nms_thresh: 0.15
+
+model:
+  core_method: 'cmt_camera_lidar_att_fuse'
+  args:
+    fused_ego_detection_range: *fused_ego_detection_range
+    single_camera_cav_detection_range: *camera_detection_range
+    single_lidar_cav_detection_range: *lidar_detection_range
+
+    use_MLN: True
+
+    Fuser:
+      type: 'FuseTransformerEncoder'
+      return_intermediate: True
+      num_layers: 3
+      transformerlayers:
+        type: 'BaseTransformerLayer'
+        attn_cfgs:
+          type: 'PETRMultiheadAttention'
+          embed_dims: 256
+          num_heads: 8
+          dropout: 0.1
+        feedforward_channels: 1024
+        ffn_dropout: 0.
+        operation_order: [ 'self_attn', 'norm', 'ffn', 'norm' ]
+
+    distance_mask:
+      flag: True
+      distance: 10.0
+
+    object_mask:
+      flag: True
+      score_threshold: 0.20
+
+    camera:
+      use_camera_flag: *use_camera
+      max_cav: *max_cav
+      pc_range: *camera_detection_range
+      CMT_C:
+        mmcv_file_path: "../camera/cmt_camera_resnet50.py"# relative to current yaml file
+        img_shape: *image_shape
+        resize_ratio: *resize_ratio
+      Camera_SeperateHead:
+        type: 'SeparateTaskHeadandBBoxCoder'
+        num_cls: *num_classes
+        init_bias: -2.19
+        final_kernel: 1
+        in_channels: 256
+        groups: 6
+        common_heads:
+          center: [ 2, 2 ]
+          height: [ 1, 2 ]
+          dim: [ 3, 2 ]
+          rot: [ 2, 2 ]
+
+    lidar:
+      use_lidar_flag: *use_lidar
+      max_cav: *max_cav
+      pc_range: *lidar_detection_range
+      CMT_L:
+        mmcv_file_path: "../lidar/cmt_lidar_pointpillar.py" # relative to current yaml file
+      Lidar_SeperateHead:
+        type: 'SeparateTaskHeadandBBoxCoder'
+        num_cls: *num_classes
+        init_bias: -2.19
+        final_kernel: 3
+        in_channels: 256
+        groups: 6
+        common_heads:
+          center: [ 2, 2 ]
+          height: [ 1, 2 ]
+          dim: [ 3, 2 ]
+          rot: [ 2, 2 ]
+
+
+    CO_SeperateHead:
+      type: 'SeparateTaskHeadandBBoxCoder'
+      num_cls: *num_classes
+      init_bias: -2.19
+      final_kernel: 1
+      in_channels: 256
+      groups: 3
+      common_heads:
+        center: [ 2, 2 ]
+        height: [ 1, 2 ]
+        dim: [ 3, 2 ]
+        rot: [ 2, 2 ]
+      bbox_coder:
+        type: 'MultiTaskBBoxCoder'
+        post_center_range: *fused_ego_gt_range
+        pc_range: *fused_ego_gt_range
+        max_num: 300
+        voxel_size: voxel_size
+        num_classes: *num_classes
+        use_sigmoid: False
+
+loss:
+  core_method: cmt_loss
+  args:
+    loss_cls:
+      bg_cls_weight: 0.1
+      type: 'CrossEntropyLoss'
+      use_sigmoid: False
+      loss_weight: 2.0
+      class_weight: 1.0
+    loss_bbox:
+      type: "L1Loss"
+      reduction: "mean"
+      loss_weight: 0.25
+    tasks:
+      num_class: 1
+      class_names: ['car']
+    assigner:
+      type: 'HungarianAssigner3D'
+      cls_cost:
+        type: 'ClassificationCost'
+        weight: 2.0
+      reg_cost:
+        type: BBox3DL1Cost
+        weight: 0.25
+      iou_cost:
+        type: 'IoUCost'
+        weight: 0.0 # Fake cost. This is just to make it compatible with DETR head.
+      pc_range: *fused_ego_gt_range
+      code_weights: [2.0, 2.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+    pc_range: *fused_ego_gt_range
+    code_weights: [2.0, 2.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+
+optimizer:
+  core_method: AdamW
+  lr: 2e-4
+  args:
+    eps: 1e-10
+    weight_decay: 1e-2
+
+lr_scheduler:
+    core_method: cosineannealwarm #step, multistep, Exponential and cosineannealwarm support
+    epoches: *epoches
+    warmup_lr: 2e-5
+    warmup_epoches: 10
+    lr_min: 5e-6
+
+#reproduce_the_experiment:
+#  seed_list: [3, 6, 9, 1]
